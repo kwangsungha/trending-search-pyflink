@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "trending-search-pyflink"
+version = "0.1.0"
+description = ""
+authors = ["kwangsung.ha <kwangsung.ha@wesang.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+apache-flink = "^1.19.0"
+python-geohash = "^0.8.5"
+ruff = "^0.4.4"
+loguru = "^0.7.2"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
