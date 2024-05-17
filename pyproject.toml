@@ -11,8 +11,26 @@ apache-flink = "^1.19.0"
 python-geohash = "^0.8.5"
 ruff = "^0.4.4"
 loguru = "^0.7.2"
+pybloom-live = "^4.0.0"
+poethepoet = "^0.26.1"
 
 
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.poe.tasks]
+  [tool.poe.tasks.run]
+  cmd = "python trending_search_pyflink/main.py"
+
+  [tool.poe.tasks.format]
+  cmd  = "ruff format ."
+
+  [tool.poe.tasks.format-check]
+  cmd  = "ruff format --check ."
+
+  [tool.poe.tasks.ruff-lint]
+  cmd  = "ruff check ."
+
+  [tool.poe.tasks.check]
+  sequence = ["format-check", "ruff-lint"]

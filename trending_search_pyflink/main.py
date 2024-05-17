@@ -18,6 +18,7 @@ from pyflink.datastream import (
 )
 from pyflink.datastream.state import MapStateDescriptor, ValueStateDescriptor
 from pyflink.datastream.window import SlidingEventTimeWindows
+from pybloom_live import ScalableBloomFilter
 
 
 """
@@ -71,7 +72,47 @@ class DuplicateUserFilter(FilterFunction):
         return True
 
 
-class ActoyoLogMapper(MapFunction):
+class FilterDuplicatesUserAndKeyword(FilterFunction):
+    def __init__(self, ttl_ms: int = 20 * 60 * 1000) -> None:
+        self.ttl_ms = ttl_ms
+
+    def open(self, runtime_context: RuntimeContext):
+        self.bloom_filter = runtime_context.get_state(
+            ValueStateDescriptor("bloom_filter", Types.PICKLED_BYTE_ARRAY())
+        )
+
+    def filter(self, value) -> bool:
+        ts_ms, _, kw, user = value
+        key = (kw, user)
+
+        ttl, seen_keywords = self._get_bloom_filter(ts_ms)
+
+        if key in seen_keywords:
+            logger.debug(f"Dedup - Key: {key} Value: {value}")
+            return False
+
+        seen_keywords.add(key)
+        self.bloom_filter.update((ttl, seen_keywords))
+
+        return True
+
+    def _get_bloom_filter(self, ts_ms):
+        state = self.bloom_filter.value()
+        if state is not None:
+            ttl, seen_keywords = state
+            if ttl < ts_ms:
+                state = None
+
+        if state is None:
+            ttl = ts_ms + self.ttl_ms
+            seen_keywords = ScalableBloomFilter(
+                mode=ScalableBloomFilter.SMALL_SET_GROWTH
+            )
+
+        return ttl, seen_keywords
+
+
+class ActyoLogMapper(MapFunction):
     def __init__(self) -> None:
         self.precision = 5
 
@@ -250,7 +291,7 @@ class TrendingSearchKeyedCoProcessFunction(KeyedCoProcessFunction):
 def main() -> None:
     env = StreamExecutionEnvironment.get_execution_environment()
     env.set_runtime_mode(RuntimeExecutionMode.BATCH)
-    env.set_parallelism(1)
+    env.set_parallelism(4)
 
     ds = env.from_collection(raw_data)
 
@@ -262,13 +303,14 @@ def main() -> None:
 
     preprocess_ds = (
         ds.flat_map(split)
-        .map(ActoyoLogMapper())
-        .filter(DuplicateUserFilter())
+        .map(ActyoLogMapper())
         .assign_timestamps_and_watermarks(
             WatermarkStrategy.for_bounded_out_of_orderness(
                 Duration.of_seconds(20)
             ).with_timestamp_assigner(FirstElementTimestampAssigner())
         )
+        .key_by(lambda x: x[1])
+        .filter(FilterDuplicatesUserAndKeyword(ttl_ms=5 * 1000))
         .map(geo_and_keyword_mapper)
         .key_by(lambda x: x[0])
     )
