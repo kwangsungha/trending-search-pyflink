@@ -25,7 +25,7 @@ from pybloom_live import ScalableBloomFilter
 QC_WINDOW_SIZE = Time.minutes(60)
 QC_WINDOW_SLIDE = Time.minutes(5)
 EMA_WINDOW_SIZE = Time.minutes(60 * 2)
-EMA_WINDOW_SLIDE = Time.minutes(30)
+EMA_WINDOW_SLIDE = Time.minutes(60)
 """
 QC_WINDOW_SIZE = Time.seconds(60)
 QC_WINDOW_SLIDE = Time.seconds(20)
@@ -57,19 +57,6 @@ raw_data = [
 
 ]
 # fmt: on
-
-
-class DuplicateUserFilter(FilterFunction):
-    def __init__(self) -> None:
-        self.cache = {}
-
-    def filter(self, value) -> bool:
-        ts_ms, _, kw, user = value
-        prev = self.cache.get((user, kw))
-        self.cache[(user, kw)] = ts_ms
-        if prev is not None and ts_ms - prev < 5000:
-            return False
-        return True
 
 
 class FilterDuplicatesUserAndKeyword(FilterFunction):
@@ -113,8 +100,8 @@ class FilterDuplicatesUserAndKeyword(FilterFunction):
 
 
 class ActyoLogMapper(MapFunction):
-    def __init__(self) -> None:
-        self.precision = 5
+    def __init__(self, precision: int = 5) -> None:
+        self.precision = precision
 
     def map(self, line) -> tuple[Any, ...]:
         ts, kw, user, lat, lng = (
@@ -164,7 +151,7 @@ class DebugProcessWindowFunction(ProcessWindowFunction):
         self,
         key: str,
         context: ProcessWindowFunction.Context,
-        elements,
+        elements: list[dict[str, int]],
     ):
         logger.debug(
             f"QC - Window: {context.window()} Key: {key} Value: {elements[0] if elements else {}}"
@@ -173,12 +160,11 @@ class DebugProcessWindowFunction(ProcessWindowFunction):
 
 
 class ExponentialMovingAverageProcessWindowFunction(ProcessWindowFunction):
-    def __init__(self, alpha: float = 0.1, debug: bool = True) -> None:
+    def __init__(self, alpha: float = 0.1) -> None:
         self.alpha = alpha
         self.descriptor = MapStateDescriptor(
             "trending_search-eda", Types.STRING(), Types.FLOAT()
         )
-        self.debug = debug
 
     def process(
         self,
@@ -309,7 +295,7 @@ def main() -> None:
                 Duration.of_seconds(20)
             ).with_timestamp_assigner(FirstElementTimestampAssigner())
         )
-        .key_by(lambda x: x[1])
+        .key_by(lambda x: x[1])  # by geohash
         .filter(FilterDuplicatesUserAndKeyword(ttl_ms=5 * 1000))
         .map(geo_and_keyword_mapper)
         .key_by(lambda x: x[0])
