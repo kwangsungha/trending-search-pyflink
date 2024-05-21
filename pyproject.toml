@@ -6,13 +6,16 @@ authors = ["kwangsung.ha <kwangsung.ha@wesang.com>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.11"
-apache-flink = "^1.19.0"
+python = "^3.10"
+apache-flink = "1.18.*"
 python-geohash = "^0.8.5"
 ruff = "^0.4.4"
 loguru = "^0.7.2"
 pybloom-live = "^4.0.0"
 poethepoet = "^0.26.1"
+pydantic-settings = "^2.2.1"
+redis = {extras = ["hiredis"], version = "^5.0.4"}
+confluent-kafka = "^2.4.0"
 
 
 [build-system]
@@ -20,8 +23,11 @@ requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poe.tasks]
-  [tool.poe.tasks.run]
+  [tool.poe.tasks.app]
   cmd = "python trending_search_pyflink/main.py"
+
+  [tool.poe.tasks.source]
+  cmd = "python trending_search_pyflink/source.py"
 
   [tool.poe.tasks.format]
   cmd  = "ruff format ."

@@ -4,6 +4,8 @@ from datetime import datetime
 import geohash
 from loguru import logger
 
+import redis
+
 from pyflink.common import Time, Duration, Types
 from pyflink.common.watermark_strategy import WatermarkStrategy, TimestampAssigner
 from pyflink.datastream import (
@@ -20,17 +22,26 @@ from pyflink.datastream.state import MapStateDescriptor, ValueStateDescriptor
 from pyflink.datastream.window import SlidingEventTimeWindows
 from pybloom_live import ScalableBloomFilter
 
+from pydantic import RedisDsn, Field, AliasChoices
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-"""
-QC_WINDOW_SIZE = Time.minutes(60)
-QC_WINDOW_SLIDE = Time.minutes(5)
-EMA_WINDOW_SIZE = Time.minutes(60 * 2)
-EMA_WINDOW_SLIDE = Time.minutes(60)
-"""
-QC_WINDOW_SIZE = Time.seconds(60)
-QC_WINDOW_SLIDE = Time.seconds(20)
-EMA_WINDOW_SIZE = Time.seconds(60 * 2)
-EMA_WINDOW_SLIDE = Time.seconds(60)
+
+class Settings(BaseSettings):
+    redis_dsn: RedisDsn = Field(
+        "redis://user:pass@localhost:6379/1",
+        validation_alias=AliasChoices("redis_dsn", "redis_url"),
+    )
+    parallelism: int = 4
+
+    qc_window_size_sec: int = 60 * 60
+    qc_window_slide_sec: int = 5 * 60
+    ema_window_size_sec: int = 120 * 60
+    ema_window_slide_sec: int = 60 * 60
+
+    model_config = SettingsConfigDict(
+        env_prefix="",
+        env_file=".env",
+    )
 
 
 # fmt: off
@@ -248,19 +259,19 @@ class TrendingSearchKeyedCoProcessFunction(KeyedCoProcessFunction):
     def _compare_trend(
         self, prev_trend: list[dict[str, Any]], curr_score: list[tuple[str, float]]
     ) -> list[dict[str, Any]]:
-        prev_ranks = {v["keyword"]: v["rank"] for v in prev_trend}
+        prev_ranks = {v["keyword"]: v["ranking"] for v in prev_trend}
         ret = []
         for rank, (keyword, score) in enumerate(curr_score):
-            v = {"rank": rank, "keyword": keyword, "score": score}
+            v = {"ranking": rank, "keyword": keyword, "score": score}
             prev_rank = prev_ranks.get(keyword, -1)
             if prev_rank < 0:
-                v["symbol"] = "new"
+                v["change_symbol"] = "new"
             elif rank < prev_rank:
-                v["symbol"] = "up"
+                v["change_symbol"] = "up"
             elif rank > prev_rank:
-                v["symbol"] = "down"
+                v["change_symbol"] = "down"
             else:
-                v["symbol"] = "-"
+                v["change_symbol"] = "-"
 
             ret.append(v)
         return ret
@@ -274,11 +285,28 @@ class TrendingSearchKeyedCoProcessFunction(KeyedCoProcessFunction):
         self.latest_trend.update(trend)
 
 
-def main() -> None:
-    env = StreamExecutionEnvironment.get_execution_environment()
-    env.set_runtime_mode(RuntimeExecutionMode.BATCH)
-    env.set_parallelism(4)
+class RedisSink(MapFunction):
+    def __init__(self, redis_dsn: str) -> None:
+        self.redis_dsn = redis_dsn
 
+    def open(self, runtime_context: RuntimeContext) -> None:
+        self.redis_client = redis.from_url(self.redis_dsn)
+
+    def map(self, value) -> None:
+        geo, ts = value
+        key = f"ts-v2:{geo}"
+        # self.redis_client.set(key, ts)
+        print(key, ts)
+
+
+def app(
+    env,
+    redis_dsn: str,
+    qc_window_size_sec: int,
+    qc_window_slide_sec: int,
+    ema_window_size_sec: int,
+    ema_window_slide_sec: int,
+) -> None:
     ds = env.from_collection(raw_data)
 
     def split(line) -> Generator[Any, None, None]:
@@ -302,14 +330,18 @@ def main() -> None:
     )
 
     query_count_ds = preprocess_ds.window(
-        SlidingEventTimeWindows.of(QC_WINDOW_SIZE, QC_WINDOW_SLIDE)
+        SlidingEventTimeWindows.of(
+            Time.seconds(qc_window_size_sec), Time.seconds(qc_window_slide_sec)
+        )
     ).aggregate(
         QueryCountAggregate(),
         window_function=DebugProcessWindowFunction(),
     )
 
     ema_ds = preprocess_ds.window(
-        SlidingEventTimeWindows.of(EMA_WINDOW_SIZE, EMA_WINDOW_SLIDE)
+        SlidingEventTimeWindows.of(
+            Time.seconds(ema_window_size_sec), Time.seconds(ema_window_slide_sec)
+        )
     ).aggregate(
         QueryCountAggregate(),
         window_function=ExponentialMovingAverageProcessWindowFunction(alpha=0.1),
@@ -321,9 +353,26 @@ def main() -> None:
         .process(TrendingSearchKeyedCoProcessFunction())
     )
 
-    trending_search_ds.print()
+    trending_search_ds.map(RedisSink(redis_dsn))
 
     env.execute()
+
+
+def main() -> None:
+    settings = Settings()
+
+    env = StreamExecutionEnvironment.get_execution_environment()
+    env.set_runtime_mode(RuntimeExecutionMode.BATCH)
+    env.set_parallelism(settings.parallelism)
+
+    app(
+        env,
+        str(settings.redis_dsn),
+        settings.qc_window_size_sec,
+        settings.qc_window_slide_sec,
+        settings.ema_window_size_sec,
+        settings.ema_window_slide_sec,
+    )
 
 
 if __name__ == "__main__":
